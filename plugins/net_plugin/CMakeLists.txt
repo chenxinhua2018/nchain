@@ -5,7 +5,7 @@ add_library( net_plugin
     net_transport.cpp
     ${HEADERS} )
 
-target_link_libraries( net_plugin chain_plugin producer_plugin appbase eosio_chain chainbase softfloat fc )
+target_link_libraries( net_plugin chain_plugin producer_plugin appbase eosio_chain chainbase softfloat fc p2p)
 target_include_directories( net_plugin
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include

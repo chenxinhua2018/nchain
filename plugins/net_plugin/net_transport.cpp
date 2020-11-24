@@ -7,6 +7,7 @@
 #include "net_transport.hpp"
 #include "connection.hpp"
 #include "net_plugin_impl.hpp"
+#include <libp2p/outcome/outcome.hpp>
 
 #include <sstream>
 
@@ -17,6 +18,10 @@ static const std::string unknown = "<unknown>";
 extern net_plugin_impl *my_impl;
 
 using tcp_connector_wptr = std::weak_ptr<tcp_connector>;
+
+inline boost::system::error_code convert_error_code(std::error_code &err) {
+    return boost::system::errc::make_error_code( static_cast<boost::system::errc::errc_t>(err.value()));
+}
 
 bool tcp_connector::init(std::shared_ptr<strand_t> strand, const string &peer_addr) {
     strand_ = strand;
@@ -336,6 +341,151 @@ void tcp_listener::close() {
         acceptor_->close( ec );
         acceptor_ = nullptr;
     }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// p2p_connector
+
+bool p2p_connector::init(std::shared_ptr<strand_t> strand, const string &peer_addr) {
+    auto server_ma_res =
+        libp2p::multi::Multiaddress::create(peer_addr);  // NOLINT
+    if (!server_ma_res) {
+        fc_elog(
+            logger,
+            "Invalid peer address. must be \"/ip4/<ip>/tcp/<port>[/<blk>|<trx>]\": ${p} : ${err}: ",
+            ("p", peer_addr)("err", server_ma_res.error().message()));
+        return false;
+    }
+    auto server_ma = std::move(server_ma_res.value());
+
+    auto server_peer_id_str = server_ma.getPeerId();
+    if (!server_peer_id_str) {
+        fc_elog(
+            logger,
+            "Invalid peer address. must be \"/ip4/<ip>/tcp/<port>[/<blk>|<trx>]\": ${p} : unable to get peer id: ",
+            ("p", peer_addr));
+        return false;
+    }
+
+    auto server_peer_id_res =
+        libp2p::peer::PeerId::fromBase58(*server_peer_id_str);
+    if (!server_peer_id_res) {
+        fc_elog(
+            logger,
+            "Unable to decode peer id from base 58: ${p}",
+            ("p", *server_peer_id_str));
+        return false;
+    }
+
+    p2p_peer_info peer_info = { server_peer_id_res.value(), {server_ma} };
+    peer_info_ = std::make_shared<p2p_peer_info>(peer_info);
+
+    strand_ = strand;
+    peer_addr_ = peer_addr;
+    return true;
+}
+
+void p2p_connector::connect(connector_t::handler_func handler) {
+
+    if (connecting_) { // TODO: need check timeout?
+        return;
+    }
+    connecting_ = true;
+
+    auto injector = libp2p::injector::makeHostInjector();
+    auto host     = injector.create<std::shared_ptr<libp2p::Host>>();
+
+    auto self = shared_from_this();
+    strand_->post([host, self, handler] { // NOLINT
+        const std::string PROTOCOL_ID = "/nchain/1.0.0";
+
+        host->newStream(*self->peer_info_, PROTOCOL_ID, [self, handler](auto &&stream_res) {
+
+            if (!stream_res) {
+                handler(convert_error_code(stream_res.error()), nullptr);
+                self->connecting_ = false;
+                return;
+            }
+
+            auto stream    = std::move(stream_res.value());
+            auto transport = std::make_shared<p2p_transport>(stream, self->peer_addr_, self->peer_info_);
+            handler({}, transport);
+            self->connecting_ = false;
+        });
+    });
+}
+
+const std::string& p2p_connector::peer_address() const {
+    return peer_addr_;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// p2p_connector
+
+p2p_transport::~p2p_transport() {
+    close();
+}
+
+void p2p_transport::close() {
+    boost::system::error_code ec;
+    if (stream_) {
+        stream_->close([](auto &&) { /* do nothing */ });
+        stream_ = nullptr;
+    }
+    is_init_ = false;
+    strand_ = nullptr;
+}
+
+bool p2p_transport::init(std::shared_ptr<strand_t> strand) {
+    strand_ = strand;
+    is_init_ = true;
+    return true;
+}
+
+void p2p_transport::write(queued_buffer &buffer_queue, write_callback_func cb) {
+
+    auto self = shared_from_this();
+
+    std::vector<boost::asio::const_buffer> bufs;
+    buffer_queue.fill_out_buffer(bufs);
+    for (auto buf : bufs) {
+        gsl::span<const uint8_t> inbuf(static_cast<const uint8_t *>(buf.data()), buf.size());
+        stream_->write(inbuf, buf.size(),
+                       [self, cb{std::move(cb)}](libp2p::outcome::result<size_t> rw) mutable {
+                           if (rw) {
+                               cb({}, rw.value());
+                           } else {
+                               cb(convert_error_code(rw.error()), 0);
+                           }
+                       });
+    }
+}
+
+void p2p_transport::read(message_buf_t &buffer, std::size_t min_size, read_callback_func cb) {
+
+    auto self = shared_from_this();
+
+    auto bufs = buffer.get_buffer_sequence_for_boost_async_read();
+    assert(bufs.size() > 0);
+    auto buf = bufs.front();
+    min_size = std::min(min_size, buf.size());
+    gsl::span<uint8_t> read_buf(static_cast<uint8_t *>(buf.data()), min_size);
+    self->stream_->read(read_buf, min_size,
+                        [self, cb{std::move(cb)}](libp2p::outcome::result<size_t> rr) mutable {
+                            if (rr) {
+                                cb({}, rr.value());
+                            } else {
+                                cb(convert_error_code(rr.error()), 0);
+                            }
+                        });
+}
+
+bool p2p_transport::is_init() const {
+    return is_init_;
+}
+
+const endpoint_info_t& p2p_transport::get_endpoint_info() {
+    return endpoint_info_;
 }
 
 } // namespace eosio

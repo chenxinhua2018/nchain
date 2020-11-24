@@ -29,6 +29,15 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/io_context_strand.hpp>
 
+#include <boost/iterator/function_output_iterator.hpp>
+#include <libp2p/common/literals.hpp>
+#include <libp2p/common/logger.hpp>
+#include <libp2p/host/basic_host.hpp>
+#include <libp2p/injector/host_injector.hpp>
+#include <libp2p/protocol/echo.hpp>
+ #include <boost/asio.hpp>
+#include <libp2p/outcome/outcome.hpp>
+
 namespace eosio {
 
 using namespace std;
@@ -147,7 +156,6 @@ class tcp_connector: public connector_t, public std::enable_shared_from_this<tcp
 public:
     bool init(std::shared_ptr<strand_t> strand, const string &peer_addr);
 
-    // TODO: ...
     void connect(connector_t::handler_func handler) override;
 
     const std::string& peer_address() const override;
@@ -228,6 +236,69 @@ public:
 private:
     std::shared_ptr<strand_t> strand_;
     std::unique_ptr<tcp::acceptor>        acceptor_;
+};
+
+using p2p_peer_info = libp2p::peer::PeerInfo;
+
+class p2p_connector: public connector_t, public std::enable_shared_from_this<p2p_connector> {
+public:
+    bool init(std::shared_ptr<strand_t> strand, const string &peer_addr);
+
+    void connect(connector_t::handler_func handler) override;
+
+    const std::string& peer_address() const override;
+
+    // connection_types get_connection_type() const { return connection_type_; };
+
+private:
+    std::shared_ptr<p2p_peer_info> peer_info_;
+    std::shared_ptr<strand_t> strand_;
+    string peer_addr_;
+    // std::atomic<connection_types> connection_type_{both};
+    bool connecting_ = false;
+    // void set_connection_type( const string& peer_addr );
+};
+
+class p2p_transport: public net_transport, public std::enable_shared_from_this<p2p_transport> {
+public:
+    using stream_t = libp2p::connection::Stream;
+
+    p2p_transport(std::shared_ptr<stream_t> stream, const string &peer_addr, std::shared_ptr<p2p_peer_info> peer_info)
+        : stream_(stream), peer_addr_(peer_addr), peer_info_(peer_info) {}
+    ~p2p_transport();
+
+    bool init(std::shared_ptr<strand_t> strand) override;
+
+    void close() override;
+    /**
+     * @brief Write exactly {@code} in.size() {@nocode} bytes.
+     * Won't call \param cb before all are successfully written.
+     * Returns immediately.
+     * @param in data to write.
+     * @param bytes number of bytes to write
+     * @param cb callback with result of operation
+     *
+     * @note caller should maintain validity of an input buffer until callback
+     * is executed. It is usually done with either wrapping buffer as shared
+     * pointer, or having buffer as part of some class/struct, and using
+     * enable_shared_from_this()
+     */
+    void write(queued_buffer &buffer_queue, write_callback_func cb) override;
+
+    void read(message_buf_t &buffer, std::size_t min_size, read_callback_func cb) override;
+
+    bool is_init() const override;
+
+    const endpoint_info_t& get_endpoint_info() override;
+private:
+    std::shared_ptr<strand_t> strand_;
+    std::shared_ptr<stream_t> stream_;
+    string peer_addr_;
+    std::shared_ptr<p2p_peer_info> peer_info_;
+    endpoint_info_t endpoint_info_;
+    bool is_init_;
+
+    void update_endpoints();
 };
 
 } // namespace eosio
