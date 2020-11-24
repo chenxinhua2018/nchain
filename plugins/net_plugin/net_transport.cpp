@@ -293,45 +293,10 @@ bool tcp_listener::init(std::shared_ptr<strand_t> strand) {
     return false;
 }
 
-void tcp_listener::accept(net_listener::accept_callback_func handler) {
+void tcp_listener::start(net_listener::accept_callback_func handler) {
     assert(strand_);
     if (!acceptor_) return;
-
-    auto self   = shared_from_this();
-    auto socket = std::make_shared<tcp::socket>(my_impl->thread_pool->get_executor());
-    acceptor_->async_accept(
-        *socket, boost::asio::bind_executor(*strand_, [self, socket{std::move(socket)},
-                                                       handler](boost::system::error_code ec) {
-            if (ec) {
-                fc_elog(logger, "Error accepting connection: ${m}", ("m", ec.message()));
-                // For the listed error codes below, recall start_listen_loop()
-                switch (ec.value()) {
-                case ECONNABORTED:
-                case EMFILE:
-                case ENFILE:
-                case ENOBUFS:
-                case ENOMEM:
-                case EPROTO:
-                    handler({}, nullptr, ""); // ignore errors
-                    return;
-                default:
-                    handler(ec, nullptr, "");
-                    return;
-                }
-            }
-
-            boost::system::error_code rec;
-            const auto &paddr_add = socket->remote_endpoint(rec).address();
-            std::string paddr_str;
-            if (rec) {
-                fc_elog(logger, "Error getting remote endpoint: ${m}", ("m", rec.message()));
-            } else {
-                paddr_str = paddr_add.to_string();
-            }
-            // TODO: get peer address
-            auto transport = std::make_shared<tcp_transport>(socket, "");
-            handler(ec, transport, paddr_str);
-        }));
+    accept(handler);
 }
 
 void tcp_listener::close() {
@@ -341,6 +306,56 @@ void tcp_listener::close() {
         acceptor_->close( ec );
         acceptor_ = nullptr;
     }
+}
+
+void tcp_listener::accept(net_listener::accept_callback_func handler) {
+
+    auto self   = shared_from_this();
+    strand_->post([self, handler]() {
+        auto socket = std::make_shared<tcp::socket>(my_impl->thread_pool->get_executor());
+
+        self->acceptor_->async_accept(
+            *socket, boost::asio::bind_executor(*self->strand_, [self, socket{std::move(socket)},
+                                                           handler](boost::system::error_code ec) {
+                if (ec) {
+                    fc_elog(logger, "Error accepting connection: ${m}", ("m", ec.message()));
+                    // For the listed error codes below, recall start_listen_loop()
+                    switch (ec.value()) {
+                    case ECONNABORTED:
+                    case EMFILE:
+                    case ENFILE:
+                    case ENOBUFS:
+                    case ENOMEM:
+                    case EPROTO:
+                        ec = boost::system::error_code(); // ignore errors
+                    }
+                    self->on_accept(handler, ec, nullptr, "");
+                    return;
+                }
+
+                boost::system::error_code rec;
+                const auto &paddr_add = socket->remote_endpoint(rec).address();
+                std::string paddr_str;
+                if (rec) {
+                    fc_elog(logger, "Error getting remote endpoint: ${m}", ("m", rec.message()));
+                } else {
+                    paddr_str = paddr_add.to_string();
+                }
+                // TODO: get peer address
+                auto transport = std::make_shared<tcp_transport>(socket, "");
+                self->on_accept(handler, ec, transport, paddr_str);
+            }));
+    });
+}
+
+void tcp_listener::on_accept(net_listener::accept_callback_func handler,
+                             boost::system::error_code &ec,
+                             std::shared_ptr<net_transport> transport,
+                             const std::string &remote_addr) {
+
+    bool ret = handler(ec, transport, remote_addr);
+    if (ec && ret)
+        accept(handler);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

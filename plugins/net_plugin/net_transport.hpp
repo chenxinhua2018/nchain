@@ -216,12 +216,14 @@ private:
 class net_listener {
 public:
     using accept_callback =
-        void(boost::system::error_code, std::shared_ptr<net_transport>, const std::string&);
+        bool(boost::system::error_code, std::shared_ptr<net_transport>, const std::string&);
     using accept_callback_func = std::function<accept_callback>;
+
+    virtual ~net_listener() {}
 
     virtual bool init(std::shared_ptr<strand_t> strand) = 0;
 
-    virtual void accept(accept_callback_func handler) = 0;
+    virtual void start(accept_callback_func handler) = 0;
 
     virtual void close() = 0;
 };
@@ -230,12 +232,16 @@ class tcp_listener: public net_listener, public std::enable_shared_from_this<tcp
 public:
     bool init(std::shared_ptr<strand_t> strand) override;
 
-    void accept(net_listener::accept_callback_func handler) override;
+    void start(net_listener::accept_callback_func handler) override;
 
     void close() override;
 private:
     std::shared_ptr<strand_t> strand_;
     std::unique_ptr<tcp::acceptor>        acceptor_;
+
+    void accept(net_listener::accept_callback_func handler);
+    void on_accept(net_listener::accept_callback_func handler, boost::system::error_code &ec,
+                   std::shared_ptr<net_transport> transport, const std::string& remote_addr);
 };
 
 using p2p_peer_info = libp2p::peer::PeerInfo;

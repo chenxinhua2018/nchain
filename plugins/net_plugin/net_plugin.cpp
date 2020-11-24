@@ -811,75 +811,61 @@ namespace eosio {
    }
 
    void net_plugin_impl::start_listen_loop() {
-       strand->post([this]() {
-           listener->accept(boost::asio::bind_executor(
-               *strand, [this](boost::system::error_code ec, std::shared_ptr<net_transport> transport,
-                               const std::string &remote_addr) {
-                   if (!ec) {
-                       if (!transport) {
-                           return; // ignore error happen
-                       }
+       listener->start(boost::asio::bind_executor(
+           *strand, [this](boost::system::error_code ec, std::shared_ptr<net_transport> transport,
+                           const std::string &remote_addr) {
+               if (!ec) {
+                   if (!transport) {
+                       return true; // ignore error happen
+                   }
 
-                       uint32_t visitors  = 0;
-                       uint32_t from_addr = 0;
-                       if (!remote_addr.empty()) {
-                           for_each_connection([&visitors, &from_addr, &remote_addr](auto &conn) {
-                               if (conn->connected()) {
-                                   if (conn->peer_address().empty()) {
-                                       ++visitors;
-                                       std::lock_guard<std::mutex> g_conn(conn->conn_mtx);
-                                       if (remote_addr == conn->get_remote_endpoint_ip()) {
-                                           ++from_addr;
-                                       }
+                   uint32_t visitors  = 0;
+                   uint32_t from_addr = 0;
+                   if (!remote_addr.empty()) {
+                       for_each_connection([&visitors, &from_addr, &remote_addr](auto &conn) {
+                           if (conn->connected()) {
+                               if (conn->peer_address().empty()) {
+                                   ++visitors;
+                                   std::lock_guard<std::mutex> g_conn(conn->conn_mtx);
+                                   if (remote_addr == conn->get_remote_endpoint_ip()) {
+                                       ++from_addr;
                                    }
                                }
-                               return true;
-                           });
-                           if (from_addr < max_nodes_per_host &&
-                               (max_client_count == 0 || visitors < max_client_count)) {
-                               connection_ptr new_connection = std::make_shared<connection>(transport);
+                           }
+                           return true;
+                       });
+                       if (from_addr < max_nodes_per_host &&
+                           (max_client_count == 0 || visitors < max_client_count)) {
+                           connection_ptr new_connection = std::make_shared<connection>(transport);
 
-                               // new_connection->connecting = true;
-                               fc_ilog(logger, "Accepted new connection: " + remote_addr);
-                               if (new_connection->start_session()) {
-                                   std::lock_guard<std::shared_mutex> g_unique(connections_mtx);
-                                   connections.insert(new_connection);
-                               }
+                           // new_connection->connecting = true;
+                           fc_ilog(logger, "Accepted new connection: " + remote_addr);
+                           if (new_connection->start_session()) {
+                               std::lock_guard<std::shared_mutex> g_unique(connections_mtx);
+                               connections.insert(new_connection);
+                           }
 
-                           } else {
-                               if (from_addr >= max_nodes_per_host) {
-                                   fc_dlog(
-                                       logger,
+                       } else {
+                           if (from_addr >= max_nodes_per_host) {
+                               fc_dlog(logger,
                                        "Number of connections (${n}) from ${ra} exceeds limit ${l}",
                                        ("n", from_addr + 1)("ra", remote_addr)("l",
                                                                                max_nodes_per_host));
-                               } else {
-                                   fc_dlog(logger, "max_client_count ${m} exceeded",
-                                           ("m", max_client_count));
-                               }
-                               // transport never added to connections and start_session not called,
-                               // lifetime will end
-                               transport->close();
+                           } else {
+                               fc_dlog(logger, "max_client_count ${m} exceeded",
+                                       ("m", max_client_count));
                            }
-                       }
-                   } else {
-                       fc_elog(logger, "Error accepting connection: ${m}", ("m", ec.message()));
-                       // For the listed error codes below, recall start_listen_loop()
-                       switch (ec.value()) {
-                       case ECONNABORTED:
-                       case EMFILE:
-                       case ENFILE:
-                       case ENOBUFS:
-                       case ENOMEM:
-                       case EPROTO:
-                           break;
-                       default:
-                           return;
+                           // transport never added to connections and start_session not called,
+                           // lifetime will end
+                           transport->close();
                        }
                    }
-                   start_listen_loop();
-               }));
-       });
+               } else {
+                   fc_elog(logger, "Error accepting connection: ${m}", ("m", ec.message()));
+                   return false; // stop accept new connection
+               }
+               return true;
+           }));
    }
 
    // call only from main application thread
