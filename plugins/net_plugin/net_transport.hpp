@@ -307,6 +307,23 @@ private:
     void update_endpoints();
 };
 
+class p2p_listener: public net_listener, public std::enable_shared_from_this<p2p_listener> {
+public:
+    bool init(std::shared_ptr<strand_t> strand) override;
+
+    void start(net_listener::accept_callback_func handler) override;
+    void accept(net_listener::accept_callback_func handler) override;
+
+    void close() override;
+private:
+    std::shared_ptr<strand_t> strand_;
+    std::unique_ptr<tcp::acceptor>        acceptor_;
+
+    void accept(net_listener::accept_callback_func handler);
+    void on_accept(net_listener::accept_callback_func handler, boost::system::error_code &ec,
+                   std::shared_ptr<net_transport> transport, const std::string& remote_addr);
+};
+
 } // namespace eosio
 
 #endif//NET_PLUGIN_NET_TRANSPORT_HPP

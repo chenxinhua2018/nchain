@@ -1459,7 +1459,11 @@ namespace eosio {
          return "already connected";
 
       auto strand = std::make_shared<strand_t>(my->thread_pool->get_executor());
+#ifdef USE_TCP_TRANSPORT
       auto connector = std::make_shared<tcp_connector>();
+#else
+      auto connector = std::make_shared<p2p_connector>();
+#endif
       if (!connector->init(strand, host)) {
          return "invalid host";
       }

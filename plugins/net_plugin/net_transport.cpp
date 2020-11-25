@@ -287,8 +287,6 @@ bool tcp_listener::init(std::shared_ptr<strand_t> strand) {
             throw e;
         }
         return true;
-        //  fc_ilog( logger, "starting listener, max clients is ${mc}",("mc",my_impl->max_client_count)
-        //  ); my_impl->start_listen_loop();
     }
     return false;
 }
@@ -319,7 +317,7 @@ void tcp_listener::accept(net_listener::accept_callback_func handler) {
                                                            handler](boost::system::error_code ec) {
                 if (ec) {
                     fc_elog(logger, "Error accepting connection: ${m}", ("m", ec.message()));
-                    // For the listed error codes below, recall start_listen_loop()
+                    // For the listed error codes below, recall accept()
                     switch (ec.value()) {
                     case ECONNABORTED:
                     case EMFILE:
@@ -501,6 +499,133 @@ bool p2p_transport::is_init() const {
 
 const endpoint_info_t& p2p_transport::get_endpoint_info() {
     return endpoint_info_;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//p2p_listener
+
+ServerContext initInsecureServer(const libp2p::crypto::KeyPair &keypair) {
+  auto injector = libp2p::injector::makeHostInjector(
+      libp2p::injector::useKeyPair(keypair),
+      libp2p::injector::useSecurityAdaptors<libp2p::security::Plaintext>());
+  auto host = injector.create<std::shared_ptr<libp2p::Host>>();
+  auto context = injector.create<std::shared_ptr<boost::asio::io_context>>();
+  return {.host = host, .io_context = context};
+}
+
+bool p2p_listener::init(std::shared_ptr<strand_t> strand) {
+    strand_ = strand;
+    tcp::endpoint listen_endpoint;
+    if (my_impl->p2p_address.size() > 0) {
+        auto host = my_impl->p2p_address.substr(0, my_impl->p2p_address.find(':'));
+        auto port = my_impl->p2p_address.substr(host.size() + 1, my_impl->p2p_address.size());
+        tcp::resolver::query query(tcp::v4(), host.c_str(), port.c_str());
+        // Note: need to add support for IPv6 too?
+
+        tcp::resolver resolver(my_impl->thread_pool->get_executor());
+        listen_endpoint = *resolver.resolve(query);
+
+        acceptor_.reset(new tcp::acceptor(my_impl->thread_pool->get_executor()));
+
+        if (!my_impl->p2p_server_address.empty()) {
+            my_impl->p2p_address = my_impl->p2p_server_address;
+        } else {
+            if (listen_endpoint.address().to_v4() == address_v4::any()) {
+                boost::system::error_code ec;
+                auto host = host_name(ec);
+                if (ec.value() != boost::system::errc::success) {
+
+                    FC_THROW_EXCEPTION(fc::invalid_arg_exception,
+                                       "Unable to retrieve host_name. ${msg}",
+                                       ("msg", ec.message()));
+                }
+                auto port =
+                    my_impl->p2p_address.substr(my_impl->p2p_address.find(':'), my_impl->p2p_address.size());
+                my_impl->p2p_address = host + port;
+            }
+        }
+    }
+    if (acceptor_) {
+        try {
+            acceptor_->open(listen_endpoint.protocol());
+            acceptor_->set_option(tcp::acceptor::reuse_address(true));
+            acceptor_->bind(listen_endpoint);
+            acceptor_->listen();
+        } catch (const std::exception &e) {
+            elog("tcp_listener failed to bind to port ${port}",
+                 ("port", listen_endpoint.port()));
+            throw e;
+        }
+        return true;
+    }
+    return false;
+}
+
+void p2p_listener::start(net_listener::accept_callback_func handler) {
+
+    assert(strand_);
+    if (!acceptor_) return;
+    accept(handler);
+}
+
+void p2p_listener::close() {
+    if( acceptor_ ) {
+        boost::system::error_code ec;
+        acceptor_->cancel( ec );
+        acceptor_->close( ec );
+        acceptor_ = nullptr;
+    }
+}
+
+
+void p2p_listener::accept(net_listener::accept_callback_func handler) {
+
+    auto self   = shared_from_this();
+    strand_->post([self, handler]() {
+        auto socket = std::make_shared<tcp::socket>(my_impl->thread_pool->get_executor());
+        acceptor_->async_accept(
+            *socket, boost::asio::bind_executor(*strand_, [self, socket{std::move(socket)},
+                                                        handler](boost::system::error_code ec) {
+                if (ec) {
+                    fc_elog(logger, "Error accepting connection: ${m}", ("m", ec.message()));
+                    // For the listed error codes below, recall accept()
+                    switch (ec.value()) {
+                    case ECONNABORTED:
+                    case EMFILE:
+                    case ENFILE:
+                    case ENOBUFS:
+                    case ENOMEM:
+                    case EPROTO:
+                        ec = boost::system::error_code(); // ignore errors
+                        break;
+                    }
+                    self->on_accept(handler, ec, nullptr, "");
+                    return;
+                }
+
+                boost::system::error_code rec;
+                const auto &paddr_add = socket->remote_endpoint(rec).address();
+                std::string paddr_str;
+                if (rec) {
+                    fc_elog(logger, "Error getting remote endpoint: ${m}", ("m", rec.message()));
+                } else {
+                    paddr_str = paddr_add.to_string();
+                }
+                // TODO: get peer address
+                auto transport = std::make_shared<tcp_transport>(socket, "");
+                self->on_accept(handler, ec, transport, paddr_str);
+            }));
+    });
+}
+
+void p2p_listener::on_accept(net_listener::accept_callback_func handler,
+                             boost::system::error_code &ec,
+                             std::shared_ptr<net_transport> transport,
+                             const std::string &remote_addr) {
+
+    bool ret = handler(ec, transport, remote_addr);
+    if (ec && ret)
+        accept(handler);
 }
 
 } // namespace eosio
